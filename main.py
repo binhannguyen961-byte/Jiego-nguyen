@@ -25,31 +25,30 @@ def keep_alive():
 # ================= 2. CẤU HÌNH BOT & DANH SÁCH API KEY =================
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "YOUR_DISCORD_BOT_TOKEN")
 
-# Lấy 3 API Key từ biến môi trường
+# Lấy các API Key từ biến môi trường
 API_KEYS = [
     os.getenv("GEMINI_API_KEY_1", ""),
     os.getenv("GEMINI_API_KEY_2", ""),
     os.getenv("GEMINI_API_KEY_3", "")
 ]
 
-API_KEYS = [k for k in API_KEYS if k.strip()]
+API_KEYS = [k.strip() for k in API_KEYS if k.strip()]
 
 if not API_KEYS:
     default_key = os.getenv("GEMINI_API_KEY", "")
     if default_key:
-        API_KEYS.append(default_key)
+        API_KEYS.append(default_key.strip())
 
 key_index = 0
 
 def get_next_ai_client():
-    """Hàm xoay vòng 3 API key"""
+    """Lấy Client Gemini tiếp theo theo vòng tròn"""
     global key_index
     if not API_KEYS:
-        raise ValueError("Chưa cấu hình API Key cho Gemini!")
+        raise ValueError("Chưa cấu hình API Key nào!")
     
     current_key = API_KEYS[key_index]
     key_index = (key_index + 1) % len(API_KEYS)
-    
     return genai.Client(api_key=current_key)
 
 intents = discord.Intents.default()
@@ -57,11 +56,10 @@ intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
-# Prompt định hình tính cách ĐIỀM TĨNH cho Jiego Nguyễn
 SYSTEM_INSTRUCTION = (
     "Bạn tên là Jiego Nguyễn. "
     "Tính cách: Cực kỳ điềm tĩnh, thản nhiên, lạnh lùng, châm biếm sâu sắc và mang chút dark humor/NSFW nhẹ. "
-    "Thái độ: Nói chuyện như một kẻ từng trải, không nóng nảy, không dùng dấu chấm cảm (!), trả lời phũ phàng nhưng với giọng điệu điềm tĩnh đến đáng sợ. "
+    "Thái độ: Nói chuyện như một kẻ từng trải, không nóng nảy, không dùng dấu chấm cảm (!), trả lời phũ phàng nhưng với giọng điệu điềm tĩnh. "
     "Mục tiêu cốt lõi: Trả lời ngắn gọn trong ĐÚNG 1 CÂU duy nhất. Tuyệt đối không chào hỏi hay giải thích dài dòng."
 )
 
@@ -80,7 +78,7 @@ async def custom_help(ctx):
     )
     await ctx.send(embed=embed)
 
-# ================= 4. LỆNH AI JIEGO NGỦYỄN =================
+# ================= 4. LỆNH AI JIEGO NGỦYỄN (TỰ CHUYỂN KEY KHI GẶP LỖI 429) =================
 @bot.command(name="jiego")
 async def jiego_chat(ctx, *, prompt: str):
     async with ctx.typing():
@@ -88,25 +86,35 @@ async def jiego_chat(ctx, *, prompt: str):
             system_instruction=SYSTEM_INSTRUCTION
         )
         
-        try:
-            ai_client = get_next_ai_client()
+        # Thử lần lượt từng API key nếu dính lỗi Quota / Rate Limit
+        max_attempts = len(API_KEYS)
+        for attempt in range(max_attempts):
+            try:
+                ai_client = get_next_ai_client()
 
-            response = await bot.loop.run_in_executor(
-                None,
-                lambda: ai_client.models.generate_content(
-                    model="gemini-3.6-flash",
-                    contents=prompt,
-                    config=config
+                response = await bot.loop.run_in_executor(
+                    None,
+                    lambda: ai_client.models.generate_content(
+                        model="gemini-3.6-flash",
+                        contents=prompt,
+                        config=config
+                    )
                 )
-            )
 
-            if response and hasattr(response, 'text') and response.text:
-                await ctx.send(response.text.strip())
-            else:
-                await ctx.send("Tôi đang bận im lặng, thử lại sau đi.")
+                if response and hasattr(response, 'text') and response.text:
+                    return await ctx.send(response.text.strip())
+                else:
+                    return await ctx.send("Tôi đang bận im lặng, thử lại sau đi.")
 
-        except Exception as e:
-            await ctx.send(f"⚠️ Lỗi hệ thống: `{e}`")
+            except Exception as e:
+                err_msg = str(e)
+                # Nếu dính lỗi hết hạn ngạch (429/RESOURCE_EXHAUSTED) và vẫn còn Key dự phòng
+                if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
+                    if attempt < max_attempts - 1:
+                        continue  # Tự động chuyển sang key kế tiếp
+                
+                # Nếu đã thử hết tất cả key hoặc dính lỗi khác
+                return await ctx.send(f"⚠️ Hết lượt sử dụng trên toàn bộ API Keys, hãy đợi khoảng 1 phút rồi thử lại.")
 
 # ================= 5. KHI BOT SẴN SÀNG =================
 @bot.event
